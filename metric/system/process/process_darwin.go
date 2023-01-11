@@ -142,7 +142,13 @@ func FillPidMetrics(_ resolve.Resolver, pid int, state ProcState, filter func(st
 		return state, fmt.Errorf("error fetching string data from process: %w", err)
 	}
 
-	state.Args = args
+	newArg := make([]string, 0, len(args))
+	for _, arg := range args {
+		if len(arg) != 0 {
+			newArg = append(newArg, arg)
+		}
+	}
+	state.Args = newArg
 	state.Exe = exe
 	if state.Env == nil {
 		state.Env = env
