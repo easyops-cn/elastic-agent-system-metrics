@@ -37,7 +37,7 @@ func TestFileSystemList(t *testing.T) {
 	skipTypes := []string{"cdrom", "tracefs", "overlay", "fuse.lxcfs", "fuse.gvfsd-fuse", "nsfs", "squashfs", "vmhgfs"}
 	hostfs := resolve.NewTestResolver("/")
 	//Exclude FS types that will give us a permission error
-	fss, err := GetFilesystems(hostfs, BuildFilterWithList(skipTypes))
+	fss, err := GetFilesystems(hostfs, BuildFilterWithList(skipTypes, []string{}))
 	if err != nil {
 		t.Fatal("GetFileSystemList", err)
 	}
@@ -169,7 +169,7 @@ func TestFilter(t *testing.T) {
 		{Type: "proc"},
 		{Type: "smb"},
 	}
-	filter := BuildFilterWithList([]string{"nfs", "smb", "proc"})
+	filter := BuildFilterWithList([]string{"nfs", "smb", "proc"}, []string{})
 	out := []FSStat{}
 	for _, fs := range in {
 		if filter(fs) {
