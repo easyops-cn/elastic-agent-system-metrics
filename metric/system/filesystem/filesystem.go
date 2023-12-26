@@ -133,8 +133,14 @@ func DefaultIgnoredTypes(sys resolve.Resolver) []string {
 }
 
 // BuildFilterWithList returns a filesystem filter with the given list of FS types
-func BuildFilterWithList(ignored []string) func(FSStat) bool {
+func BuildFilterWithList(ignored, collect []string) func(FSStat) bool {
 	return func(fs FSStat) bool {
+		for _, fsType := range collect {
+			if fs.Type == fsType {
+				return true
+			}
+		}
+
 		for _, fsType := range ignored {
 			if fs.Type == fsType {
 				return false
@@ -146,7 +152,7 @@ func BuildFilterWithList(ignored []string) func(FSStat) bool {
 
 func buildDefaultFilters(hostfs resolve.Resolver) func(FSStat) bool {
 	ignoreType := DefaultIgnoredTypes(hostfs)
-	return BuildFilterWithList(ignoreType)
+	return BuildFilterWithList(ignoreType, []string{})
 }
 
 // If a block device is mounted multiple times (e.g. with some bind mounts),
