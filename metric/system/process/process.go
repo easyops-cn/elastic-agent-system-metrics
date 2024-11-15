@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	psutil "github.com/shirou/gopsutil/process"
@@ -213,7 +212,16 @@ func (procStats *Stats) pidFill(pid int, filter bool) (ProcState, bool, error) {
 		return status, true, fmt.Errorf("FillPidMetrics: %w", err)
 	}
 	if len(status.Args) > 0 && status.Cmdline == "" {
-		status.Cmdline = strings.Join(status.Args, " ")
+		// 统一 easyops sampler 获取 cmdline 逻辑
+		p := &psutil.Process{}
+		p, err = psutil.NewProcess(int32(pid))
+		if err != nil {
+			return status, true, fmt.Errorf("new process error: %w", err)
+		}
+		status.Cmdline, err = p.Cmdline()
+		if err != nil {
+			return status, true, fmt.Errorf("get process cmdline error: %w", err)
+		}
 	}
 
 	//postprocess with cgroups and percentages
