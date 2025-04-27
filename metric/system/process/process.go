@@ -222,6 +222,16 @@ func (procStats *Stats) pidFill(pid int, filter bool) (ProcState, bool, error) {
 		if err != nil {
 			return status, true, fmt.Errorf("get process cmdline error: %w", err)
 		}
+
+		status.Cwd, err = p.Cwd()
+		if err != nil {
+			return status, true, fmt.Errorf("get process cwd error: %w", err)
+		}
+
+		status.Exe, err = p.Exe()
+		if err != nil {
+			return status, true, fmt.Errorf("get process exe error: %w", err)
+		}
 	}
 
 	//postprocess with cgroups and percentages
