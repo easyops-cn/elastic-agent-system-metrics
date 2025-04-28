@@ -211,29 +211,31 @@ func (procStats *Stats) pidFill(pid int, filter bool) (ProcState, bool, error) {
 	if err != nil {
 		return status, true, fmt.Errorf("FillPidMetrics: %w", err)
 	}
+
+	// 统一 easyops sampler 获取 cmdline、cwd、exe 逻辑
+	p := &psutil.Process{}
+	p, err = psutil.NewProcess(int32(pid))
+	if err != nil {
+		return status, true, fmt.Errorf("new process error: %w", err)
+	}
 	if len(status.Args) > 0 && status.Cmdline == "" {
-		// 统一 easyops sampler 获取 cmdline 逻辑
-		p := &psutil.Process{}
-		p, err = psutil.NewProcess(int32(pid))
-		if err != nil {
-			return status, true, fmt.Errorf("new process error: %w", err)
-		}
 		status.Cmdline, err = p.Cmdline()
 		if err != nil {
 			return status, true, fmt.Errorf("get process cmdline error: %w", err)
 		}
-
+	}
+	if status.Cwd == "" {
 		status.Cwd, err = p.Cwd()
 		if err != nil {
 			return status, true, fmt.Errorf("get process cwd error: %w", err)
 		}
-
+	}
+	if status.Exe == "" {
 		status.Exe, err = p.Exe()
 		if err != nil {
 			return status, true, fmt.Errorf("get process exe error: %w", err)
 		}
 	}
-
 	//postprocess with cgroups and percentages
 	last, ok := procStats.ProcsMap.GetPid(status.Pid.ValueOr(0))
 	status.SampleTime = time.Now()
