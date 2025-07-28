@@ -114,12 +114,12 @@ type Stats struct {
 	host         types.Host
 }
 
-type AliveState string
+type AliveState int
 
 var (
-	AliveStateNormal   AliveState = "alive"
-	AliveStateAbnormal AliveState = "dead"
-	AliveStateUnknown  AliveState = "unknown"
+	AliveStateNormal   AliveState = 0
+	AliveStateAbnormal AliveState = 1
+	AliveStateUnknown  AliveState = 2
 )
 
 // PidState are the constants for various PID states
