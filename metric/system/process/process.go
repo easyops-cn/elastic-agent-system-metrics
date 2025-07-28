@@ -117,9 +117,13 @@ func (procStats *Stats) Get() ([]mapstr.M, []mapstr.M, error) {
 	//Format the list to the MapStr type used by the outputs
 	procs := []mapstr.M{}
 	rootEvents := []mapstr.M{}
+	aliveProcs := []string{}
 
 	for _, process := range plist {
 		process := process
+		aliveProcs = append(aliveProcs, process.Cmdline)
+		process.AliveState = AliveStateNormal
+
 		// Add the RSS pct memory first
 		process.Memory.Rss.Pct = GetProcMemPercentage(process, totalPhyMem)
 		//Create the root event
@@ -132,6 +136,26 @@ func (procStats *Stats) Get() ([]mapstr.M, []mapstr.M, error) {
 			return nil, nil, fmt.Errorf("error converting process for pid %d: %w", process.Pid.ValueOr(0), err)
 		}
 
+		procs = append(procs, proc)
+		rootEvents = append(rootEvents, rootMap)
+	}
+
+	// check if the cmdline is in the checkCmdlines list
+	deadProcs := procStats.checkAliveProcs(aliveProcs)
+	for _, cmdline := range deadProcs {
+		process := ProcState{}
+		process.Cmdline = cmdline
+		process.AliveState = AliveStateAbnormal
+
+		root := process.FormatForRoot()
+		rootMap := mapstr.M{}
+		_ = typeconv.Convert(&rootMap, root)
+
+		proc, err := procStats.getProcessEvent(&process)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error converting process for pid %d: %w", process.Pid.ValueOr(0), err)
+		}
+		
 		procs = append(procs, proc)
 		rootEvents = append(rootEvents, rootMap)
 	}
@@ -374,4 +398,23 @@ func (procStats Stats) isWhitelistedEnvVar(varName string) bool {
 		}
 	}
 	return false
+}
+
+// checkAliveProcs checks if the cmdline is in the checkCmdlines list
+// if not, it will be added to the deadProcs list
+func (procStats *Stats) checkAliveProcs(aliveProcs []string) []string {
+	aliveProcsMap := make(map[string]struct{})
+	deadProcs := []string{}
+
+	for _, cmdline := range aliveProcs {
+		aliveProcsMap[cmdline] = struct{}{}
+	}
+
+	for _, cmdline := range procStats.CheckCmdlines {
+		if _, ok := aliveProcsMap[cmdline]; !ok {
+			deadProcs = append(deadProcs, cmdline)
+		}
+	}
+
+	return deadProcs
 }

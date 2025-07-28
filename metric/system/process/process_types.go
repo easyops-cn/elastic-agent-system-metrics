@@ -54,6 +54,9 @@ type ProcState struct {
 
 	// meta
 	SampleTime time.Time `struct:"-,omitempty"`
+
+	// Alive
+	AliveState AliveState `struct:"alive_state,omitempty"`
 }
 
 // ProcCPUInfo is the main struct for CPU metrics

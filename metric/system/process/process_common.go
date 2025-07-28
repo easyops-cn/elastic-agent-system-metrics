@@ -37,7 +37,7 @@ import (
 // ProcNotExist indicates that a process was not found.
 var ProcNotExist = errors.New("process does not exist")
 
-//ProcsMap is a convinence wrapper for the oft-used ideom of map[int]ProcState
+// ProcsMap is a convinence wrapper for the oft-used ideom of map[int]ProcState
 type ProcsMap map[int]ProcState
 
 // ProcsTrack is a thread-safe wrapper for a process Stat object's internal map of processes.
@@ -101,6 +101,11 @@ type Stats struct {
 	// the names of which can be found in /proc/PID/net/snmp and /proc/PID/net/netstat
 	NetworkMetrics []string
 
+	// easyops config
+	// The CheckCmdlines parameter specifies the processes to be checked for survivability; 
+	// if no cmdline is specified in the list of returned processes, the process is determined to be abnormal.
+	CheckCmdlines  []string
+
 	skipExtended bool
 	procRegexps  []match.Matcher // List of regular expressions used to whitelist processes.
 	envRegexps   []match.Matcher // List of regular expressions used to whitelist env vars.
@@ -109,7 +114,15 @@ type Stats struct {
 	host         types.Host
 }
 
-//PidState are the constants for various PID states
+type AliveState string
+
+var (
+	AliveStateNormal   AliveState = "alive"
+	AliveStateAbnormal AliveState = "dead"
+	AliveStateUnknown  AliveState = "unknown"
+)
+
+// PidState are the constants for various PID states
 type PidState string
 
 var (
