@@ -159,3 +159,71 @@ func TestMetricsPercentages(t *testing.T) {
 	assert.EqualValues(t, .0, idle.(float64))
 	assert.EqualValues(t, 1., total.(float64))
 }
+
+// TestTotalTicksPreferred tests that Total() returns the pre-computed
+// TotalTicks value when set, rather than summing the individual fields.
+func TestTotalTicksPreferred(t *testing.T) {
+	cpu := CPU{
+		User:       opt.UintWith(100),
+		Sys:        opt.UintWith(0),
+		Idle:       opt.UintWith(9000),
+		TotalTicks: opt.UintWith(10000),
+	}
+	assert.Equal(t, uint64(10000), cpu.Total())
+
+	// Without TotalTicks, Total falls back to summing fields
+	cpu2 := CPU{
+		User:       opt.UintWith(100),
+		Sys:        opt.UintWith(0),
+		Idle:       opt.UintWith(9000),
+	}
+	assert.Equal(t, uint64(9100), cpu2.Total())
+}
+
+// TestWindowsNegativeKernelDerivation tests that when Sys is zero-value
+// (Windows kernel < idle overflow, so Sys was left as opt.Uint{}),
+// system pct is derived as totalPct - userPct, and all percentages are valid.
+func TestWindowsNegativeKernelDerivation(t *testing.T) {
+	// Layout: idle=70%, user=20%, system=10% of total.
+	// Sys is not set (IsZero()=true) to simulate Windows overflow path.
+	// TotalTicks carries the correct total computed via int64.
+	prev := CPU{
+		User:       opt.UintWith(20000),
+		Idle:       opt.UintWith(70000),
+		Sys:        opt.Uint{}, // overflowed, not set
+		TotalTicks: opt.UintWith(100000),
+	}
+	cur := CPU{
+		User:       opt.UintWith(22000),  // +2000
+		Idle:       opt.UintWith(77000),  // +7000
+		Sys:        opt.Uint{},           // still overflowed
+		TotalTicks: opt.UintWith(110000), // +10000
+	}
+
+	sample := Metrics{
+		count:          64,
+		isTotals:       true,
+		previousSample: prev,
+		currentSample:  cur,
+	}
+
+	evt, err := sample.Format(MetricOpts{NormalizedPercentages: true, Percentages: true})
+	assert.NoError(t, err)
+
+	// total.norm.pct = 1 - idlePct = 1 - 0.7 = 0.30
+	totalNormPct, _ := evt.GetValue("total.norm.pct")
+	assert.InDelta(t, 0.30, totalNormPct.(float64), 0.01)
+
+	// user.norm.pct = 2000/10000 = 0.20
+	userNormPct, _ := evt.GetValue("user.norm.pct")
+	assert.InDelta(t, 0.20, userNormPct.(float64), 0.01)
+
+	// system.norm.pct = totalPct - userPct = 0.30 - 0.20 = 0.10
+	sysNormPct, _ := evt.GetValue("system.norm.pct")
+	assert.InDelta(t, 0.10, sysNormPct.(float64), 0.01)
+
+	// idle + user + system ≈ 1.0 (normalized)
+	idleNormPct, _ := evt.GetValue("idle.norm.pct")
+	sum := idleNormPct.(float64) + userNormPct.(float64) + sysNormPct.(float64)
+	assert.InDelta(t, 1.0, sum, 0.01, "idle+user+system should sum to ~1.0 (normalized)")
+}

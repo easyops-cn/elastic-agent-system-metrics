@@ -33,14 +33,15 @@ import (
 // should assume that any value can be null.
 // The values are in "ticks", which translates to milliseconds of CPU time
 type CPU struct {
-	User    opt.Uint `struct:"user,omitempty"`
-	Sys     opt.Uint `struct:"system,omitempty"`
-	Idle    opt.Uint `struct:"idle,omitempty"`
-	Nice    opt.Uint `struct:"nice,omitempty"`    // Linux, Darwin, BSD
-	Irq     opt.Uint `struct:"irq,omitempty"`     // Linux and openbsd
-	Wait    opt.Uint `struct:"iowait,omitempty"`  // Linux and AIX
-	SoftIrq opt.Uint `struct:"softirq,omitempty"` // Linux only
-	Stolen  opt.Uint `struct:"steal,omitempty"`   // Linux only
+	User       opt.Uint `struct:"user,omitempty"`
+	Sys        opt.Uint `struct:"system,omitempty"`
+	Idle       opt.Uint `struct:"idle,omitempty"`
+	Nice       opt.Uint `struct:"nice,omitempty"`    // Linux, Darwin, BSD
+	Irq        opt.Uint `struct:"irq,omitempty"`     // Linux and openbsd
+	Wait       opt.Uint `struct:"iowait,omitempty"`  // Linux and AIX
+	SoftIrq    opt.Uint `struct:"softirq,omitempty"` // Linux only
+	Stolen     opt.Uint `struct:"steal,omitempty"`   // Linux only
+	TotalTicks opt.Uint `struct:"total,omitempty"`   // Pre-computed total, used on Windows where uint64 overflow can occur
 }
 
 // MetricOpts defines the fields that are passed along to the formatted output
@@ -72,10 +73,14 @@ type CPUMetrics struct {
 	CPUInfo []CPUInfo
 }
 
-// Total returns the total CPU time in ticks as scraped by the API
+// Total returns the total CPU time in ticks as scraped by the API.
+// If a pre-computed TotalTicks value is available (e.g. from Windows where
+// uint64 overflow can occur), it is used. Otherwise, the total is
+// computed as the sum of all CPU state fields.
 func (cpu CPU) Total() uint64 {
-	// it's generally safe to blindly sum these up,
-	// As we're just trying to get a total of all CPU time.
+	if !cpu.TotalTicks.IsZero() {
+		return cpu.TotalTicks.ValueOr(0)
+	}
 	return opt.SumOptUint(cpu.User, cpu.Nice, cpu.Sys, cpu.Idle, cpu.Wait, cpu.Irq, cpu.SoftIrq, cpu.Stolen)
 }
 
@@ -181,7 +186,22 @@ func (metric Metrics) Format(opts MetricOpts) (mapstr.M, error) {
 
 	// /proc/stat metrics
 	reportOptMetric("user", metric.currentSample.User, metric.previousSample.User, normCPU)
-	reportOptMetric("system", metric.currentSample.Sys, metric.previousSample.Sys, normCPU)
+	if !metric.currentSample.Sys.IsZero() || !metric.previousSample.Sys.IsZero() {
+		reportOptMetric("system", metric.currentSample.Sys, metric.previousSample.Sys, normCPU)
+	} else {
+		// Windows path: Sys was not set due to kernel < idle (uint64 overflow).
+		// Derive systemPct = totalPct - userPct via dot-path Put for proper merging.
+		if opts.NormalizedPercentages {
+			totalPct := createTotal(metric.previousSample, metric.currentSample, timeDelta, 1)
+			userPct := cpuMetricTimeDelta(metric.previousSample.User, metric.currentSample.User, timeDelta, 1)
+			_, _ = formattedMetrics.Put("system.norm.pct", totalPct-userPct)
+		}
+		if opts.Percentages {
+			totalPct := createTotal(metric.previousSample, metric.currentSample, timeDelta, normCPU)
+			userPct := cpuMetricTimeDelta(metric.previousSample.User, metric.currentSample.User, timeDelta, normCPU)
+			_, _ = formattedMetrics.Put("system.pct", totalPct-userPct)
+		}
+	}
 	reportOptMetric("idle", metric.currentSample.Idle, metric.previousSample.Idle, normCPU)
 	reportOptMetric("nice", metric.currentSample.Nice, metric.previousSample.Nice, normCPU)
 	reportOptMetric("irq", metric.currentSample.Irq, metric.previousSample.Irq, normCPU)

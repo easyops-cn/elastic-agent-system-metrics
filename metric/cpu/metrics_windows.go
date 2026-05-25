@@ -39,13 +39,26 @@ func Get(_ resolve.Resolver) (CPUMetrics, error) {
 	}
 
 	globalMetrics := CPUMetrics{}
-	//convert from duration to ticks
+
+	// Use int64 intermediate variables to avoid uint64 overflow when
+	// gosigar returns negative kernel (happens when rawIdle > rawKernel
+	// on some 64-core Windows machines).
+	totalMs := int64(idle/time.Millisecond) + int64(kernel/time.Millisecond) + int64(user/time.Millisecond)
+	if totalMs < 0 {
+		totalMs = 0
+	}
+
+	// convert from duration to ticks
 	idleMetric := uint64(idle / time.Millisecond)
-	sysMetric := uint64(kernel / time.Millisecond)
+	sysMetric := opt.Uint{}
+	if kernel >= 0 {
+		sysMetric = opt.UintWith(uint64(kernel / time.Millisecond))
+	}
 	userMetrics := uint64(user / time.Millisecond)
 	globalMetrics.totals.Idle = opt.UintWith(idleMetric)
-	globalMetrics.totals.Sys = opt.UintWith(sysMetric)
+	globalMetrics.totals.Sys = sysMetric
 	globalMetrics.totals.User = opt.UintWith(userMetrics)
+	globalMetrics.totals.TotalTicks = opt.UintWith(uint64(totalMs))
 
 	// get per-cpu data
 	cpus, err := windows.NtQuerySystemProcessorPerformanceInformation()
@@ -54,13 +67,23 @@ func Get(_ resolve.Resolver) (CPUMetrics, error) {
 	}
 	globalMetrics.list = make([]CPU, 0, len(cpus))
 	for _, cpu := range cpus {
-		idleMetric := uint64(cpu.IdleTime / time.Millisecond)
-		sysMetric := uint64(cpu.KernelTime / time.Millisecond)
-		userMetrics := uint64(cpu.UserTime / time.Millisecond)
+		perIdleMs := int64(cpu.IdleTime / time.Millisecond)
+		perKernelMs := int64(cpu.KernelTime / time.Millisecond)
+		perUserMs := int64(cpu.UserTime / time.Millisecond)
+		perTotalMs := perIdleMs + perKernelMs + perUserMs
+		if perTotalMs < 0 {
+			perTotalMs = 0
+		}
+		perSysMs := opt.Uint{}
+		if perKernelMs >= 0 {
+			perSysMs = opt.UintWith(uint64(perKernelMs))
+		}
+
 		globalMetrics.list = append(globalMetrics.list, CPU{
-			Idle: opt.UintWith(idleMetric),
-			Sys:  opt.UintWith(sysMetric),
-			User: opt.UintWith(userMetrics),
+			Idle:       opt.UintWith(uint64(perIdleMs)),
+			Sys:        perSysMs,
+			User:       opt.UintWith(uint64(perUserMs)),
+			TotalTicks: opt.UintWith(uint64(perTotalMs)),
 		})
 	}
 
