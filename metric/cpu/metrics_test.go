@@ -227,3 +227,107 @@ func TestWindowsNegativeKernelDerivation(t *testing.T) {
 	sum := idleNormPct.(float64) + userNormPct.(float64) + sysNormPct.(float64)
 	assert.InDelta(t, 1.0, sum, 0.01, "idle+user+system should sum to ~1.0 (normalized)")
 }
+
+// TestWindowsNegativeKernelTransition tests that when Sys transitions between
+// zero-value (anomaly) and a valid value (normal), system.pct is always derived
+// via totalPct - userPct, avoiding the wild percentage swings that the old ||
+// condition produced.
+//
+// Background: On some 64-core Windows machines, GetSystemTimes() returns
+// idle > kernel intermittently. gosigar computes kernel - idle, yielding a
+// negative Duration. The fix in metrics_windows.go sets Sys to opt.Uint{} when
+// kernel < 0. The Format() method must use && (not ||) so that a transition
+// from normal→anomaly or anomaly→normal always takes the derive path.
+func TestWindowsNegativeKernelTransition(t *testing.T) {
+	// Layout: 30% user, 10% system (normalized), 60% idle.
+	// Each step adds ~10000 ticks total. 64 logical CPUs.
+	const numCPU = 64
+
+	// S0: Normal (Sys is valid)
+	s0 := CPU{
+		User:       opt.UintWith(250000000),
+		Sys:        opt.UintWith(100000000),
+		Idle:       opt.UintWith(600000000),
+		TotalTicks: opt.UintWith(900000000),
+	}
+	// S1: Normal (Sys still valid)
+	s1 := CPU{
+		User:       opt.UintWith(250048000),
+		Sys:        opt.UintWith(100048000),
+		Idle:       opt.UintWith(600224000),
+		TotalTicks: opt.UintWith(900320000),
+	}
+	// S2: Anomaly (gosigar kernel-idle went negative, Sys = zero-value)
+	s2 := CPU{
+		User:       opt.UintWith(250096000),
+		Sys:        opt.Uint{}, // NOT set due to overflow
+		Idle:       opt.UintWith(600448000),
+		TotalTicks: opt.UintWith(900640000),
+	}
+	// S3: Still anomaly
+	s3 := CPU{
+		User:       opt.UintWith(250144000),
+		Sys:        opt.Uint{},
+		Idle:       opt.UintWith(600672000),
+		TotalTicks: opt.UintWith(900960000),
+	}
+	// S4: Recovered (Sys valid again)
+	s4 := CPU{
+		User:       opt.UintWith(250192000),
+		Sys:        opt.UintWith(100144000),
+		Idle:       opt.UintWith(600896000),
+		TotalTicks: opt.UintWith(901280000),
+	}
+
+	type transition struct {
+		name      string
+		prev, cur CPU
+		// sysNormPct expected: 0.10 (10% system normalized)
+		// sysPct expected: 6.4 (10% * 64 CPUs)
+	}
+
+	cases := []transition{
+		{"Normal -> Normal", s0, s1},
+		{"Normal -> Anomaly", s1, s2},
+		{"Anomaly -> Anomaly", s2, s3},
+		{"Anomaly -> Normal", s3, s4},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sample := Metrics{
+				count:          numCPU,
+				isTotals:       true,
+				previousSample: tc.prev,
+				currentSample:  tc.cur,
+			}
+
+			evt, err := sample.Format(MetricOpts{NormalizedPercentages: true, Percentages: true})
+			assert.NoError(t, err, "Format() should not return error")
+
+			// All scenarios should produce consistent system.pct regardless of Sys state.
+			// Actual breakdown: 15% user, 15% system (derived), 70% idle, 30% total non-idle.
+			sysNormPct, _ := evt.GetValue("system.norm.pct")
+			assert.InDelta(t, 0.15, sysNormPct.(float64), 0.01,
+				"system.norm.pct should be ~0.15 in all transition scenarios, got %v", sysNormPct)
+
+			sysPct, _ := evt.GetValue("system.pct")
+			assert.InDelta(t, 9.6, sysPct.(float64), 0.01,
+				"system.pct should be ~9.6 in all transition scenarios, got %v", sysPct)
+
+			// Sanity: total, user, idle should also be stable
+			totalNormPct, _ := evt.GetValue("total.norm.pct")
+			assert.InDelta(t, 0.30, totalNormPct.(float64), 0.01)
+
+			userNormPct, _ := evt.GetValue("user.norm.pct")
+			assert.InDelta(t, 0.15, userNormPct.(float64), 0.01)
+
+			idleNormPct, _ := evt.GetValue("idle.norm.pct")
+			assert.InDelta(t, 0.70, idleNormPct.(float64), 0.01)
+
+			// Sanity: no percentage should be wildly out of range
+			assert.Greater(t, sysNormPct.(float64), -1.0, "system.norm.pct should not be deeply negative")
+			assert.Less(t, sysNormPct.(float64), 2.0, "system.norm.pct should not be wildly positive")
+		})
+	}
+}

@@ -186,11 +186,15 @@ func (metric Metrics) Format(opts MetricOpts) (mapstr.M, error) {
 
 	// /proc/stat metrics
 	reportOptMetric("user", metric.currentSample.User, metric.previousSample.User, normCPU)
-	if !metric.currentSample.Sys.IsZero() || !metric.previousSample.Sys.IsZero() {
+	if !metric.currentSample.Sys.IsZero() && !metric.previousSample.Sys.IsZero() {
 		reportOptMetric("system", metric.currentSample.Sys, metric.previousSample.Sys, normCPU)
 	} else {
-		// Windows path: Sys was not set due to kernel < idle (uint64 overflow).
-		// Derive systemPct = totalPct - userPct via dot-path Put for proper merging.
+		// Windows path: Sys is not available in one or both samples (e.g. kernel < idle
+		// overflow, or first sample where previous is zero). Report ticks when current
+		// Sys is valid, and derive percentages via totalPct - userPct.
+		if !metric.currentSample.Sys.IsZero() && opts.Ticks {
+			_, _ = formattedMetrics.Put("system.ticks", metric.currentSample.Sys.ValueOr(0))
+		}
 		if opts.NormalizedPercentages {
 			totalPct := createTotal(metric.previousSample, metric.currentSample, timeDelta, 1)
 			userPct := cpuMetricTimeDelta(metric.previousSample.User, metric.currentSample.User, timeDelta, 1)
