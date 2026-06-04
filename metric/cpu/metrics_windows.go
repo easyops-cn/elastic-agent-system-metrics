@@ -63,7 +63,7 @@ func Get(_ resolve.Resolver) (CPUMetrics, error) {
 	// get per-cpu data
 	cpus, err := windows.NtQuerySystemProcessorPerformanceInformation()
 	if err != nil {
-		return CPUMetrics{}, fmt.Errorf("catll to NtQuerySystemProcessorPerformanceInformation failed: %w", err)
+		return CPUMetrics{}, fmt.Errorf("call to NtQuerySystemProcessorPerformanceInformation failed: %w", err)
 	}
 	globalMetrics.list = make([]CPU, 0, len(cpus))
 	for _, cpu := range cpus {

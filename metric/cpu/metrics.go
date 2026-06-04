@@ -91,8 +91,10 @@ calculate CPU percentages, as we average usage across a time period.
 
 // Monitor is used to monitor the overall CPU usage of the system over time.
 type Monitor struct {
-	lastSample CPUMetrics
-	Hostfs     resolve.Resolver
+	lastSample      CPUMetrics
+	lastMetrics     Metrics   // cached last successful total Metrics for reuse on anomaly
+	lastCoreMetrics []Metrics // cached last successful per-core Metrics for reuse on anomaly
+	Hostfs          resolve.Resolver
 }
 
 // New returns a new CPU metrics monitor
@@ -109,10 +111,32 @@ func (m *Monitor) Fetch() (Metrics, error) {
 		return Metrics{}, fmt.Errorf("error fetching CPU metrics: %w", err)
 	}
 
+	// First sample: store but don't produce Metrics (no previous to compare against).
+	// Use Idle as the indicator since TotalTicks is only set on Windows.
+	if m.lastSample.totals.Idle.IsZero() {
+		m.lastSample = metric
+		return Metrics{}, nil
+	}
+
+	numCPU := len(metric.list)
+	if numCPU == 0 {
+		numCPU = 1
+	}
+	if !isDeltaReasonable(m.lastSample.totals, metric.totals, numCPU) {
+		// Counter discontinuity detected: reuse last successful result.
+		// Keep previous lastSample so next collection can compute a valid delta.
+		if m.lastMetrics.count > 0 {
+			return m.lastMetrics, nil
+		}
+		return Metrics{}, fmt.Errorf("cpu counter delta out of reasonable range, no previous result to reuse")
+	}
+
 	oldLastSample := m.lastSample
 	m.lastSample = metric
 
-	return Metrics{previousSample: oldLastSample.totals, currentSample: metric.totals, count: len(metric.list), isTotals: true}, nil
+	result := Metrics{previousSample: oldLastSample.totals, currentSample: metric.totals, count: numCPU, isTotals: true}
+	m.lastMetrics = result
+	return result, nil
 }
 
 // FetchCores collects a new sample of CPU usage metrics per-core
@@ -131,6 +155,25 @@ func (m *Monitor) FetchCores() ([]Metrics, error) {
 		if len(m.lastSample.list) > i {
 			lastMetric = m.lastSample.list[i]
 		}
+
+		// Skip per-CPU samples with counter discontinuity (Windows only;
+		// isDeltaReasonable returns true when TotalTicks is not set).
+		if !lastMetric.TotalTicks.IsZero() && !isDeltaReasonable(lastMetric, metric.list[i], 1) {
+			// Reuse last successful per-core result if available.
+			// Per-core Metrics never sets count, so check TotalTicks instead.
+			if m.lastCoreMetrics != nil && i < len(m.lastCoreMetrics) &&
+				!m.lastCoreMetrics[i].currentSample.TotalTicks.IsZero() {
+				coreMetrics[i] = m.lastCoreMetrics[i]
+			} else {
+				coreMetrics[i] = Metrics{
+					currentSample:  metric.list[i],
+					previousSample: lastMetric,
+					isTotals:       false,
+				}
+			}
+			continue
+		}
+
 		coreMetrics[i] = Metrics{
 			currentSample:  metric.list[i],
 			previousSample: lastMetric,
@@ -145,6 +188,7 @@ func (m *Monitor) FetchCores() ([]Metrics, error) {
 		}
 	}
 	m.lastSample = metric
+	m.lastCoreMetrics = coreMetrics
 	return coreMetrics, nil
 }
 
@@ -160,10 +204,17 @@ type Metrics struct {
 // Format returns the final MapStr data object for the metrics.
 func (metric Metrics) Format(opts MetricOpts) (mapstr.M, error) {
 
-	timeDelta := metric.currentSample.Total() - metric.previousSample.Total()
-	if timeDelta <= 0 {
-		return nil, errors.New("previous sample is newer than current sample")
+	// Guard against uint64 underflow: compare directly before subtraction.
+	// Only applies when TotalTicks is set (Windows). On other platforms,
+	// Total() falls back to summing fields, which handles zero prev gracefully.
+	curTotal := metric.currentSample.Total()
+	prevTotal := metric.previousSample.Total()
+	if !metric.currentSample.TotalTicks.IsZero() && !metric.previousSample.TotalTicks.IsZero() {
+		if curTotal <= prevTotal {
+			return nil, errors.New("total ticks did not increase (counter discontinuity)")
+		}
 	}
+	timeDelta := curTotal - prevTotal
 	normCPU := metric.count
 	if !metric.isTotals {
 		normCPU = 1
@@ -267,4 +318,59 @@ func cpuMetricTimeDelta(prev, current opt.Uint, timeDelta uint64, numCPU int) fl
 	cpuDelta := int64(current.ValueOr(0) - prev.ValueOr(0))
 	pct := float64(cpuDelta) / float64(timeDelta)
 	return metric.Round(pct * float64(numCPU))
+}
+
+// isDeltaReasonable checks that the counter deltas between two CPU samples are
+// within physically plausible bounds. On some Windows machines with many cores,
+// the GetSystemTimes() API intermittently returns non-monotonic or wildly
+// inflated counter values due to a kernel aggregation race. This function
+// detects those anomalies so the caller can skip the bad sample.
+//
+// On non-Windows platforms TotalTicks is not set (zero), so the check is
+// skipped entirely — counter discontinuity is a Windows-only issue.
+//
+// Returns false (anomaly detected) when TotalTicks is set and:
+//   - TotalTicks did not increase (counter went backward)
+//   - Idle went backward
+//   - User went backward
+//   - TotalTicks delta is disproportionately large (the Windows counter jump
+//     pattern: TotalTicks increases by hours' worth in a single interval)
+func isDeltaReasonable(prev, cur CPU, numCPU int) bool {
+	curTotal := cur.TotalTicks.ValueOr(0)
+	prevTotal := prev.TotalTicks.ValueOr(0)
+
+	// TotalTicks is only set on Windows; skip check on other platforms.
+	if curTotal == 0 && prevTotal == 0 {
+		return true
+	}
+
+	if curTotal <= prevTotal {
+		return false
+	}
+
+	curIdle := cur.Idle.ValueOr(0)
+	prevIdle := prev.Idle.ValueOr(0)
+	if curIdle < prevIdle {
+		return false
+	}
+
+	curUser := cur.User.ValueOr(0)
+	prevUser := prev.User.ValueOr(0)
+	if curUser < prevUser {
+		return false
+	}
+
+	// TotalTicks = idle + kernel + user (includes idle on Windows).
+	// When counters jump anomalously, TotalTicks increases by hours' worth
+	// of time in a single collection interval. Check that totalDelta/numCPU
+	// (wall-clock time per core) is within a reasonable bound.
+	// For any normal collection interval (< 15 minutes), this should be
+	// well below the threshold. The anomaly produces values equivalent
+	// to hours.
+	totalDelta := curTotal - prevTotal
+	if float64(totalDelta)/float64(numCPU) > 15*60*1000 {
+		return false
+	}
+
+	return true
 }
